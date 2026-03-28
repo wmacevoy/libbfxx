@@ -115,4 +115,4 @@ doc/                     API reference for libbf and libbf++
 
 ## License
 
-libbf is Copyright (c) 2017-2021 Fabrice Bellard — see `vendor/libbf/` for license details. The C++ wrapper is provided under the same terms.
+MIT License. Both the C++ wrapper and the vendored [libbf](https://bellard.org/libbf/) library (Copyright (c) 2017-2025 Fabrice Bellard) are MIT-licensed.
