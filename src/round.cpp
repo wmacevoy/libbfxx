@@ -2,6 +2,8 @@
 #include <iomanip>
 #include "bf.hpp"
 
+using namespace bellard;
+
 int main() {
     BFContext context(256, 34);
     retain<BFContext> use(&context);

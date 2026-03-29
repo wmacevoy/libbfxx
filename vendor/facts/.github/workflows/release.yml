@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  # ── Test first ──────────────────────────────────────────────
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build libraries
+      run: make
+    - name: Build and run tests
+      run: make check
+
+  # ── Build .deb packages ────────────────────────────────────
+  build-deb:
+    needs: test
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        apt-get update
+        apt-get install -y build-essential debhelper g++ dpkg-dev
+
+    - name: Build .deb packages
+      run: |
+        dpkg-buildpackage -us -uc
+        mkdir -p deb-out
+        cp ../*.deb ../*.changes deb-out/
+
+    - name: Upload .deb artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: deb-packages
+        path: deb-out/*
+
+  # ── Build Alpine .apk (CMake) ──────────────────────────────
+  build-alpine:
+    needs: test
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build tools
+      run: apk add --no-cache build-base cmake g++
+
+    - name: CMake build and install
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr \
+          -DCMAKE_INSTALL_LIBDIR=lib
+        cmake --build build
+        DESTDIR=$PWD/staging cmake --install build
+
+    - name: Package as tarball
+      run: |
+        cd staging
+        tar czf ../libfacts-${{ github.ref_name }}-alpine.tar.gz .
+
+    - name: Upload Alpine artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: alpine-package
+        path: libfacts-*.tar.gz
+
+  # ── Build Windows zip (CMake + MSVC) ───────────────────────
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: CMake build and install
+      run: |
+        cmake -B build -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/staging
+        cmake --build build --config Release
+        cmake --install build --config Release
+
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-package
+        path: staging/
+
+  # ── Create GitHub Release ──────────────────────────────────
+  release:
+    needs: [build-deb, build-alpine, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Compute tarball sha256
+      id: sha
+      run: |
+        URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz"
+        curl -sL "$URL" -o source.tar.gz
+        SHA=$(shasum -a 256 source.tar.gz | cut -d' ' -f1)
+        echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+        echo "Source tarball sha256: $SHA"
+
+    - name: Create release
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        body: |
+          ## Install
+
+          **From source (Unix):**
+          ```sh
+          make && sudo make install
+          ```
+
+          **From source (Windows / cross-platform):**
+          ```sh
+          cmake -B build && cmake --build build --config Release && cmake --install build
+          ```
+
+          **Homebrew (macOS / Linux):**
+          ```sh
+          brew tap wmacevoy/facts
+          brew install facts
+          ```
+          Update the formula `sha256` to: `${{ steps.sha.outputs.sha256 }}`
+
+          **Debian / Ubuntu:** download and install the `.deb` files from the assets below:
+          ```sh
+          sudo dpkg -i libfacts-2_*.deb libfacts-dev_*.deb
+          ```
+
+          ## Usage
+
+          ```c
+          #include <facts.h>
+
+          FACTS(Example) {
+            FACT(1 + 1, ==, 2);
+          }
+
+          FACTS_REGISTER_ALL() { FACTS_REGISTER(Example); }
+          FACTS_MAIN
+          ```
+
+          ```sh
+          cc -std=c11 -o check your.c -lfacts && ./check
+          ```
+
+          Or use `--facts_find` for zero-registration workflow:
+          ```sh
+          cc -std=c11 -rdynamic -o check your.c -lfacts && ./check --facts_find your.c
+          ```
+
+          ## VSCode Extension
+
+          Download `facts-test-runner-*.vsix` from the CI artifacts and install:
+          ```sh
+          code --install-extension facts-test-runner-*.vsix
+          ```
+          Or in VSCode: Extensions → ⋯ → Install from VSIX.
+        files: |
+          artifacts/deb-packages/*.deb
+          artifacts/alpine-package/*.tar.gz
+
+  # ── Publish apt repo (optional, gated on ENABLE_APT_REPO) ─
+  apt-repo:
+    needs: release
+    if: vars.ENABLE_APT_REPO == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download .deb artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: deb-packages
+        path: deb-packages
+
+    - name: Set up reprepro
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y reprepro
+
+    - name: Import GPG key
+      run: echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+    - name: Build apt repository
+      run: |
+        mkdir -p apt/conf
+        cat >apt/conf/distributions <<EOF
+        Codename: stable
+        Components: main
+        Architectures: amd64 arm64 i386
+        SignWith: default
+        EOF
+        for deb in deb-packages/*.deb; do
+          reprepro -b apt includedeb stable "$deb"
+        done
+        cp apt/facts.gpg apt/dists/ 2>/dev/null || true
+
+    - name: Upload Pages artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: apt
+
+    - name: Deploy to GitHub Pages
+      id: deploy
+      uses: actions/deploy-pages@v4

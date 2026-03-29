@@ -1,0 +1,20 @@
+{
+	"name": "Facts Dev",
+	"build": {
+		"context": "..",
+		"dockerfile": "../Dockerfile"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-vscode.cpptools",
+				"ms-vscode.cmake-tools",
+				"dbaeumer.vscode-eslint"
+			],
+			"settings": {
+				"editor.formatOnSave": true
+			}
+		}
+	},
+	"postCreateCommand": "cd /app/vscode-facts && npm install && npm run compile"
+}

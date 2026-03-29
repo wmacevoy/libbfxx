@@ -2,6 +2,7 @@
 
 #include <string>
 #include <iostream>
+#include <memory>
 #include <new>
 #include <cstdlib>
 
@@ -11,35 +12,57 @@ extern "C" {
 
 #include "retain.hpp"
 
+namespace bellard {
+
 class BFDec;
 
-struct BFContext {
+// ── Ref-counted allocator wrapping bf_context_t ─────────────────────
+
+struct BFAlloc {
     bf_context_t ctx;
+
+    static void *realloc_wrapper(void *, void *ptr, size_t size) {
+        if (size == 0) { free(ptr); return nullptr; }
+        return realloc(ptr, size);
+    }
+
+    BFAlloc() { bf_context_init(&ctx, realloc_wrapper, nullptr); }
+    ~BFAlloc() { bf_context_end(&ctx); }
+
+    BFAlloc(const BFAlloc &) = delete;
+    BFAlloc &operator=(const BFAlloc &) = delete;
+};
+
+// ── Context: allocator + precision/rounding settings ────────────────
+
+struct BFContext {
+    std::shared_ptr<BFAlloc> alloc;
     limb_t prec;    // binary precision in bits (for BF)
     limb_t dprec;   // decimal precision in digits (for BFDec)
     bf_flags_t flags;
 
-    static void *realloc_wrapper(void *, void *ptr, size_t size) {
-        if (size == 0) {
-            free(ptr);
-            return nullptr;
-        }
-        return realloc(ptr, size);
-    }
-
     BFContext(limb_t prec = 128, limb_t dprec = 34, bf_rnd_t rnd = BF_RNDN)
-        : prec(prec), dprec(dprec), flags(bf_set_exp_bits(BF_EXP_BITS_MAX) | rnd)
-    {
-        bf_context_init(&ctx, realloc_wrapper, nullptr);
-    }
+        : alloc(std::make_shared<BFAlloc>()),
+          prec(prec), dprec(dprec),
+          flags(bf_set_exp_bits(BF_EXP_BITS_MAX) | rnd)
+    {}
 
-    ~BFContext() { bf_context_end(&ctx); }
+    // Create a context sharing the same allocator but different settings
+    BFContext(const std::shared_ptr<BFAlloc> &a, limb_t prec, limb_t dprec, bf_rnd_t rnd = BF_RNDN)
+        : alloc(a), prec(prec), dprec(dprec),
+          flags(bf_set_exp_bits(BF_EXP_BITS_MAX) | rnd)
+    {}
+
+    bf_context_t *ctx() { return &alloc->ctx; }
 
     BFContext(const BFContext &) = delete;
     BFContext &operator=(const BFContext &) = delete;
 };
 
 // ── Context accessors via retain/recall ─────────────────────────────
+
+inline std::shared_ptr<BFAlloc> bf_alloc() { return recall<BFContext>()->alloc; }
+inline bf_context_t *bf_ctx() { return recall<BFContext>()->ctx(); }
 
 inline limb_t bf_prec() { return recall<BFContext>()->prec; }
 inline void bf_prec(limb_t p) { recall<BFContext>()->prec = p; }
@@ -61,43 +84,46 @@ inline void bf_rnd(bf_rnd_t rnd) {
 
 class BF {
     bf_t val;
-
-    static bf_context_t *ctx() { return &recall<BFContext>()->ctx; }
+    std::shared_ptr<BFAlloc> alloc;  // ref-counted allocator
 
 public:
-    BF() { bf_init(ctx(), &val); }
+    BF() : alloc(bf_alloc()) {
+        bf_init(&alloc->ctx, &val);
+    }
 
     BF(int v) : BF(static_cast<int64_t>(v)) {}
 
-    BF(int64_t v) {
-        bf_init(ctx(), &val);
+    BF(int64_t v) : alloc(bf_alloc()) {
+        bf_init(&alloc->ctx, &val);
         bf_set_si(&val, v);
     }
 
-    BF(uint64_t v) {
-        bf_init(ctx(), &val);
+    BF(uint64_t v) : alloc(bf_alloc()) {
+        bf_init(&alloc->ctx, &val);
         bf_set_ui(&val, v);
     }
 
-    BF(double v) {
-        bf_init(ctx(), &val);
+    BF(double v) : alloc(bf_alloc()) {
+        bf_init(&alloc->ctx, &val);
         bf_set_float64(&val, v);
     }
 
-    BF(const char *str, int radix = 10) {
-        bf_init(ctx(), &val);
+    BF(const char *str, int radix = 10) : alloc(bf_alloc()) {
+        bf_init(&alloc->ctx, &val);
         bf_atof(&val, str, nullptr, radix, bf_prec(), bf_flags());
     }
 
     BF(const std::string &str, int radix = 10) : BF(str.c_str(), radix) {}
 
-    BF(const BF &other) {
-        bf_init(ctx(), &val);
+    BF(const BF &other) : alloc(bf_alloc()) {
+        bf_init(&alloc->ctx, &val);
         bf_set(&val, &other.val);
     }
 
-    BF(BF &&other) noexcept {
-        bf_init(ctx(), &val);
+    BF(BF &&other) noexcept : alloc(std::move(other.alloc)) {
+        // bf_move does *r = *a, so val.ctx becomes other's allocator
+        // which alloc (moved from other) keeps alive
+        bf_init(&alloc->ctx, &val);
         bf_move(&val, &other.val);
         other.val.tab = nullptr;
         other.val.len = 0;
@@ -110,12 +136,17 @@ public:
     ~BF() { bf_delete(&val); }
 
     BF &operator=(const BF &other) {
-        if (this != &other) bf_set(&val, &other.val);
+        if (this != &other) {
+            // Keep our allocator — bf_set allocates via val.ctx (ours)
+            bf_set(&val, &other.val);
+        }
         return *this;
     }
 
     BF &operator=(BF &&other) noexcept {
         if (this != &other) {
+            // bf_move sets val.ctx = other's allocator, so take its ref
+            alloc = std::move(other.alloc);
             bf_move(&val, &other.val);
             other.val.tab = nullptr;
             other.val.len = 0;
@@ -196,6 +227,9 @@ public:
         return v;
     }
 
+    // Precision actually carried by this value (in bits)
+    limb_t precision() const { return val.len * LIMB_BITS; }
+
     std::string to_string(int radix = 10, limb_t digits = 0) const {
         bf_flags_t fmt_flags;
         limb_t p;
@@ -203,8 +237,9 @@ public:
             fmt_flags = BF_FTOA_FORMAT_FIXED | BF_RNDN;
             p = digits;
         } else {
+            // Use value's actual precision for lossless round-trip
             fmt_flags = BF_FTOA_FORMAT_FREE | bf_flags();
-            p = bf_prec();
+            p = precision();
         }
         size_t len;
         char *s = bf_ftoa(&len, &val, radix, p, fmt_flags);
@@ -245,38 +280,41 @@ public:
 
 class BFDec {
     bfdec_t val;
-
-    static bf_context_t *ctx() { return &recall<BFContext>()->ctx; }
+    std::shared_ptr<BFAlloc> alloc;  // ref-counted allocator
 
 public:
-    BFDec() { bfdec_init(ctx(), &val); }
+    BFDec() : alloc(bf_alloc()) {
+        bfdec_init(&alloc->ctx, &val);
+    }
 
     BFDec(int v) : BFDec(static_cast<int64_t>(v)) {}
 
-    BFDec(int64_t v) {
-        bfdec_init(ctx(), &val);
+    BFDec(int64_t v) : alloc(bf_alloc()) {
+        bfdec_init(&alloc->ctx, &val);
         bfdec_set_si(&val, v);
     }
 
-    BFDec(uint64_t v) {
-        bfdec_init(ctx(), &val);
+    BFDec(uint64_t v) : alloc(bf_alloc()) {
+        bfdec_init(&alloc->ctx, &val);
         bfdec_set_ui(&val, v);
     }
 
-    BFDec(const char *str) {
-        bfdec_init(ctx(), &val);
+    BFDec(double v) : BFDec(BF(v)) {}
+
+    BFDec(const char *str) : alloc(bf_alloc()) {
+        bfdec_init(&alloc->ctx, &val);
         bfdec_atof(&val, str, nullptr, bf_dprec(), bf_flags());
     }
 
     BFDec(const std::string &str) : BFDec(str.c_str()) {}
 
-    BFDec(const BFDec &other) {
-        bfdec_init(ctx(), &val);
+    BFDec(const BFDec &other) : alloc(bf_alloc()) {
+        bfdec_init(&alloc->ctx, &val);
         bfdec_set(&val, &other.val);
     }
 
-    BFDec(BFDec &&other) noexcept {
-        bfdec_init(ctx(), &val);
+    BFDec(BFDec &&other) noexcept : alloc(std::move(other.alloc)) {
+        bfdec_init(&alloc->ctx, &val);
         bfdec_move(&val, &other.val);
         other.val.tab = nullptr;
         other.val.len = 0;
@@ -284,8 +322,8 @@ public:
     }
 
     // Convert from binary float
-    BFDec(const BF &b) {
-        bfdec_init(ctx(), &val);
+    BFDec(const BF &b) : alloc(bf_alloc()) {
+        bfdec_init(&alloc->ctx, &val);
         bfdec_from_f(&val, b.c_bf(), bf_dprec(), bf_flags());
     }
 
@@ -298,6 +336,7 @@ public:
 
     BFDec &operator=(BFDec &&other) noexcept {
         if (this != &other) {
+            alloc = std::move(other.alloc);
             bfdec_move(&val, &other.val);
             other.val.tab = nullptr;
             other.val.len = 0;
@@ -373,6 +412,12 @@ public:
         return v;
     }
 
+    // Precision actually carried by this value (in decimal digits)
+    limb_t precision() const {
+        constexpr limb_t digits_per_limb = (LIMB_BITS == 64) ? 19 : 9;
+        return val.len * digits_per_limb;
+    }
+
     std::string to_string(limb_t digits = 0) const {
         bf_flags_t fmt_flags;
         limb_t p;
@@ -380,8 +425,9 @@ public:
             fmt_flags = BF_FTOA_FORMAT_FIXED | BF_RNDN;
             p = digits;
         } else {
+            // Use value's actual precision for lossless round-trip
             fmt_flags = BF_FTOA_FORMAT_FREE | bf_flags();
-            p = bf_dprec();
+            p = precision();
         }
         size_t len;
         char *s = bfdec_ftoa(&len, &val, p, fmt_flags);
@@ -409,8 +455,8 @@ public:
 
 // ── Deferred inline: BF from BFDec ─────────────────────────────────
 
-inline BF::BF(const BFDec &d) {
-    bf_init(ctx(), &val);
+inline BF::BF(const BFDec &d) : alloc(bf_alloc()) {
+    bf_init(&alloc->ctx, &val);
     bfdec_to_f(&val, d.c_bfdec(), bf_prec(), bf_flags());
 }
 
@@ -519,3 +565,5 @@ inline BFDec pow(const BFDec &a, limb_t b) {
     bfdec_pow_ui(&r.val, &a.val, b);
     return r;
 }
+
+} // namespace bellard
