@@ -112,8 +112,8 @@ enum qjson_type : uint16_t {
     QJSON_TRUE       = 0x011,  // 0b0'0001'0001
     QJSON_NUMBER     = 0x021,  // 0b0'0010'0001
     QJSON_BIGINT     = 0x022,  // 0b0'0010'0010
-    QJSON_BIGDECIMAL = 0x024,  // 0b0'0010'0100
-    QJSON_BIGFLOAT   = 0x028,  // 0b0'0010'1000
+    QJSON_BIGFLOAT   = 0x024,  // 0b0'0010'0100
+    QJSON_BIGDECIMAL = 0x028,  // 0b0'0010'1000
     QJSON_BLOB       = 0x040,  // 0b0'0100'0000
     QJSON_STRING     = 0x081,  // 0b0'1000'0001
     QJSON_ARRAY      = 0x101,  // 0b1'0000'0001

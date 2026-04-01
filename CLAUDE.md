@@ -43,8 +43,8 @@ Bitmask-based `enum qjson_type : uint16_t` encodes type identity and group membe
 | `QJSON_TRUE` | `0x011` | bit 4 = BOOLEAN |
 | `QJSON_NUMBER` | `0x021` | bit 5 = NUMERIC |
 | `QJSON_BIGINT` | `0x022` | bit 5 = NUMERIC |
-| `QJSON_BIGDECIMAL` | `0x024` | bit 5 = NUMERIC |
-| `QJSON_BIGFLOAT` | `0x028` | bit 5 = NUMERIC |
+| `QJSON_BIGFLOAT` | `0x024` | bit 5 = NUMERIC |
+| `QJSON_BIGDECIMAL` | `0x028` | bit 5 = NUMERIC |
 | `QJSON_BLOB` | `0x040` | bit 6 |
 | `QJSON_STRING` | `0x081` | bit 7 |
 | `QJSON_ARRAY` | `0x101` | bit 8 = CONTAINER |

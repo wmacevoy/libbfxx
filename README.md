@@ -140,8 +140,8 @@ Bitmask-based `enum qjson_type : uint16_t` encodes type identity and group membe
 |------|--------|-----|-------|
 | `QJSON_NUMBER` | (none) | `0x021` | NUMERIC |
 | `QJSON_BIGINT` | `N` | `0x022` | NUMERIC |
-| `QJSON_BIGDECIMAL` | `M` | `0x024` | NUMERIC |
-| `QJSON_BIGFLOAT` | `L` | `0x028` | NUMERIC |
+| `QJSON_BIGFLOAT` | `L` | `0x024` | NUMERIC |
+| `QJSON_BIGDECIMAL` | `M` | `0x028` | NUMERIC |
 | `QJSON_UNBOUND` | `?` | `0x1FF` | all bits |
 
 Group tests: `type & QJSON_NUMERIC`, `type & QJSON_BOOLEAN`, `type & QJSON_CONTAINER`. The full enum also includes `NULL`, `FALSE`, `TRUE`, `BLOB`, `STRING`, `ARRAY`, `OBJECT` for forward compatibility with the QJSON project.
